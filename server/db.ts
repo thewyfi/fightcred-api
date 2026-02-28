@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   credibilityLog,
@@ -115,7 +115,7 @@ export async function getUpcomingEvents(): Promise<Event[]> {
 export async function getAllEvents(): Promise<Event[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(events).orderBy(desc(events.eventDate));
+  return db.select().from(events).orderBy(asc(events.eventDate));
 }
 
 export async function getEventById(id: number): Promise<Event | null> {
