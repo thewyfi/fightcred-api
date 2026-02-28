@@ -98,7 +98,9 @@ async function getProfileRedirect(userId: number, redirectTo: string, fallback: 
     const db = await getDb();
     if (!db) return redirectTo || fallback;
     const rows = await db.select({ id: userProfiles.id }).from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1);
-    const base = redirectTo || fallback;
+    // Strip any existing /profile/setup suffix to get the clean base URL
+    const raw = redirectTo || fallback;
+    const base = raw.replace(/\/profile\/setup\/?$/, "");
     return rows.length === 0 ? `${base}/profile/setup` : base;
   } catch {
     return redirectTo || fallback;
