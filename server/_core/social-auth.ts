@@ -93,7 +93,7 @@ function setSessionCookie(req: Request, res: Response, token: string) {
   });
 }
 
-async function getProfileRedirect(userId: number, redirectTo: string, fallback: string): Promise<string> {
+async function getProfileRedirect(userId: number, redirectTo: string, fallback: string, sessionToken?: string): Promise<string> {
   try {
     const db = await getDb();
     if (!db) return redirectTo || fallback;
@@ -101,7 +101,13 @@ async function getProfileRedirect(userId: number, redirectTo: string, fallback: 
     // Strip any existing /profile/setup suffix to get the clean base URL
     const raw = redirectTo || fallback;
     const base = raw.replace(/\/profile\/setup\/?$/, "");
-    return rows.length === 0 ? `${base}/profile/setup` : base;
+    const path = rows.length === 0 ? `${base}/profile/setup` : base;
+    // Append session token as query param for cross-origin auth (cookie may not transfer)
+    if (sessionToken) {
+      const sep = path.includes("?") ? "&" : "?";
+      return `${path}${sep}token=${encodeURIComponent(sessionToken)}`;
+    }
+    return path;
   } catch {
     return redirectTo || fallback;
   }
@@ -198,7 +204,7 @@ export function registerSocialAuthRoutes(app: Express) {
 
       const sessionToken = await createSessionJWT(openId, user.name || googleUser.name || "");
       setSessionCookie(req, res, sessionToken);
-      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL);
+      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL, sessionToken);
       res.redirect(destination);
     } catch (err: any) {
       console.error("[Google OAuth] Error:", err);
@@ -283,7 +289,7 @@ export function registerSocialAuthRoutes(app: Express) {
 
       const sessionToken = await createSessionJWT(openId, user.name || twitterUser.name || "");
       setSessionCookie(req, res, sessionToken);
-      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL);
+      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL, sessionToken);
       res.redirect(destination);
     } catch (err: any) {
       console.error("[Twitter OAuth] Error:", err);
@@ -345,7 +351,7 @@ export function registerSocialAuthRoutes(app: Express) {
 
       const sessionToken = await createSessionJWT(openId, user.name || fbUser.name || "");
       setSessionCookie(req, res, sessionToken);
-      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL);
+      const destination = await getProfileRedirect(user.id, redirectTo, WEB_APP_URL, sessionToken);
       res.redirect(destination);
     } catch (err: any) {
       console.error("[Facebook OAuth] Error:", err);
@@ -426,7 +432,7 @@ export function registerSocialAuthRoutes(app: Express) {
 
       const sessionToken = await createSessionJWT(openId, user.name || email.split("@")[0]);
       setSessionCookie(req, res, sessionToken);
-      const finalDestination = await getProfileRedirect(user.id, destination, WEB_APP_URL);
+      const finalDestination = await getProfileRedirect(user.id, destination, WEB_APP_URL, sessionToken);
       res.redirect(finalDestination);
     } catch (err: any) {
       console.error("[Magic Link] Verify error:", err);
