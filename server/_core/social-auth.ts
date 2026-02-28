@@ -98,16 +98,18 @@ async function getProfileRedirect(userId: number, redirectTo: string, fallback: 
     const db = await getDb();
     if (!db) return redirectTo || fallback;
     const rows = await db.select({ id: userProfiles.id }).from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1);
-    // Strip any existing /profile/setup suffix to get the clean base URL
+    // Always redirect to /auth/callback so the frontend can handle token storage
+    // Strip any existing /profile/setup or /auth/callback suffix to get the clean base URL
     const raw = redirectTo || fallback;
-    const base = raw.replace(/\/profile\/setup\/?$/, "");
-    const path = rows.length === 0 ? `${base}/profile/setup` : base;
-    // Append session token as query param for cross-origin auth (cookie may not transfer)
-    if (sessionToken) {
-      const sep = path.includes("?") ? "&" : "?";
-      return `${path}${sep}token=${encodeURIComponent(sessionToken)}`;
-    }
-    return path;
+    const base = raw.replace(/\/(profile\/setup|auth\/callback)\/?$/, "");
+    const callbackUrl = `${base}/auth/callback`;
+    const isNewUser = rows.length === 0;
+    // Build query params
+    const params = new URLSearchParams();
+    if (sessionToken) params.set("token", sessionToken);
+    if (isNewUser) params.set("setup", "1");
+    const queryString = params.toString();
+    return queryString ? `${callbackUrl}?${queryString}` : callbackUrl;
   } catch {
     return redirectTo || fallback;
   }
