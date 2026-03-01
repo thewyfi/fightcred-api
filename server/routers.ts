@@ -302,13 +302,10 @@ export const appRouter = router({
           const profile = await db.getUserProfile(pred.userId);
           if (profile) {
             const isUnderdog = pickedOdds != null && pickedOdds >= 150;
-            const newScore = profile.credibilityScore + breakdown.totalPoints;
-            const newTier = getTierFromScore(newScore);
             const newStreak = correctWinner ? profile.currentStreak + 1 : 0;
 
+            // Update counters (score will be recalculated below)
             await db.updateUserProfile(pred.userId, {
-              credibilityScore: newScore,
-              tier: newTier,
               totalPicks: profile.totalPicks + 1,
               correctPicks: profile.correctPicks + (correctWinner ? 1 : 0),
               correctFinishPicks: profile.correctFinishPicks + (correctFinish ? 1 : 0),
@@ -322,6 +319,16 @@ export const appRouter = router({
             });
 
             await db.upsertFighterStat(pred.userId, pred.pickedWinner, correctWinner);
+          }
+        }
+
+        // Recalculate normalized 0-100 score for each affected user
+        const affectedUserIds = [...new Set(allPredictions.map((p) => p.userId))];
+        for (const userId of affectedUserIds) {
+          const normalizedScore = await db.recalcNormalizedScoreForUser(userId);
+          const profile = await db.getUserProfile(userId);
+          if (profile) {
+            await db.updateUserProfile(userId, { tier: getTierFromScore(normalizedScore) });
           }
         }
 
@@ -528,13 +535,10 @@ export const appRouter = router({
           const profile = await db.getUserProfile(pred.userId);
           if (profile) {
             const isUnderdog = pickedOdds != null && pickedOdds >= 150;
-            const newScore = profile.credibilityScore + breakdown.totalPoints;
-            const newTier = getTierFromScore(newScore);
             const newStreak = correctWinner ? profile.currentStreak + 1 : 0;
 
+            // Update counters only — normalized score recalculated below
             await db.updateUserProfile(pred.userId, {
-              credibilityScore: newScore,
-              tier: newTier,
               totalPicks: profile.totalPicks + 1,
               correctPicks: profile.correctPicks + (correctWinner ? 1 : 0),
               correctFinishPicks: profile.correctFinishPicks + (correctFinish ? 1 : 0),
@@ -548,6 +552,16 @@ export const appRouter = router({
             });
 
             await db.upsertFighterStat(pred.userId, pred.pickedWinner, correctWinner);
+          }
+        }
+
+        // Recalculate normalized 0-100 score for each affected user
+        const affectedUserIds = [...new Set(allPredictions.map((p) => p.userId))];
+        for (const userId of affectedUserIds) {
+          const normalizedScore = await db.recalcNormalizedScoreForUser(userId);
+          const profile = await db.getUserProfile(userId);
+          if (profile) {
+            await db.updateUserProfile(userId, { tier: getTierFromScore(normalizedScore) });
           }
         }
 
@@ -589,6 +603,19 @@ export const appRouter = router({
         if (!ENV.adminToken || input.token !== ENV.adminToken) throw new Error("Unauthorized");
         await db.upsertEvent({ id: input.eventId, name: "", eventDate: new Date(), status: input.status });
         return { success: true };
+      }),
+
+    // Recalculate normalized 0-100 credibility scores for ALL users
+    recalcAllScores: publicProcedure
+      .input(z.object({ token: z.string() }))
+      .mutation(async ({ input }) => {
+        if (!ENV.adminToken || input.token !== ENV.adminToken) throw new Error("Unauthorized");
+        const results = await db.recalcAllNormalizedScores();
+        // Update tiers for all users
+        for (const { userId, score } of results) {
+          await db.updateUserProfile(userId, { tier: getTierFromScore(score) });
+        }
+        return { success: true, updated: results.length, scores: results };
       }),
   }),
 });

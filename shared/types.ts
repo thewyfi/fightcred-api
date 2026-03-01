@@ -25,13 +25,114 @@ export interface CredibilityBreakdown {
   totalPoints: number;
   multiplier: number;
   impliedProbability: number;
+  // Penalty for wrong picks (negative value)
+  penalty: number;
 }
 
+// ─── Normalized 0-100 Credibility Score ──────────────────────────────────────
+
+export interface NormalizedPickResult {
+  pickValue: number;       // the weighted contribution of this pick (-1.0 to +1.5)
+  maxPossible: number;     // max possible value for this pick (always positive)
+  oddsWeight: number;      // 1 / implied_probability
+  correct: boolean;
+}
+
+/**
+ * Calculate the normalized 0-100 credibility score for a user from all their resolved picks.
+ * Rewards upset picks, penalizes wrong picks (especially wrong chalk picks).
+ */
+export function calcNormalizedCredScore(
+  picks: Array<{
+    correct: boolean;
+    pickedFinishType?: FinishType | null;
+    pickedMethod?: "tko_ko" | "submission" | null;
+    resultFinishType?: FinishType | null;
+    resultMethod?: MethodType | null;
+    pickedFighterOdds: number | null;
+  }>
+): number {
+  if (picks.length === 0) return 0;
+
+  let totalValue = 0;
+  let totalMaxPossible = 0;
+
+  for (const pick of picks) {
+    const impliedProb = pick.pickedFighterOdds != null
+      ? getImpliedProbability(pick.pickedFighterOdds)
+      : 0.5;
+    const oddsWeight = 1 / impliedProb; // higher for underdogs
+
+    if (pick.correct) {
+      // Base: correct winner
+      let value = 1.0 * oddsWeight;
+
+      // Bonus for correct finish type
+      const correctFinish = pick.pickedFinishType != null && pick.pickedFinishType === pick.resultFinishType;
+      if (correctFinish) {
+        value += 0.25 * oddsWeight;
+      }
+
+      // Bonus for correct method (TKO/KO or SUB)
+      const correctMethod =
+        pick.pickedFinishType === "finish" &&
+        pick.resultFinishType === "finish" &&
+        pick.pickedMethod != null &&
+        pick.resultMethod != null &&
+        ((pick.resultMethod === "tko_ko" && pick.pickedMethod === "tko_ko") ||
+          (pick.resultMethod === "submission" && pick.pickedMethod === "submission"));
+      if (correctMethod) {
+        value += 0.25 * oddsWeight;
+      }
+
+      totalValue += value;
+    } else {
+      // Penalty for wrong pick — scaled by how much of a favourite they picked
+      // Picking a heavy favourite wrong hurts more than picking an underdog wrong
+      let penalty: number;
+      if (pick.pickedFighterOdds == null) {
+        penalty = -0.5; // unknown odds — moderate penalty
+      } else if (pick.pickedFighterOdds <= -300) {
+        penalty = -1.0; // picked a massive favourite, they lost — big penalty
+      } else if (pick.pickedFighterOdds <= -150) {
+        penalty = -0.75; // clear favourite
+      } else if (pick.pickedFighterOdds <= -110) {
+        penalty = -0.5; // slight favourite
+      } else if (pick.pickedFighterOdds <= 110) {
+        penalty = -0.35; // pick'em / coin flip
+      } else {
+        penalty = -0.2; // picked an underdog and they lost — least penalised
+      }
+      totalValue += penalty;
+    }
+
+    // Max possible for this pick = 1.5 × oddsWeight (correct + finish + method bonus)
+    totalMaxPossible += 1.5 * oddsWeight;
+  }
+
+  // Volume confidence multiplier — prevents 1 lucky pick = 100 score
+  const n = picks.length;
+  let volumeMultiplier: number;
+  if (n >= 50)      volumeMultiplier = 1.00;
+  else if (n >= 20) volumeMultiplier = 0.92;
+  else if (n >= 10) volumeMultiplier = 0.80;
+  else if (n >= 5)  volumeMultiplier = 0.65;
+  else              volumeMultiplier = 0.40;
+
+  // Normalize: totalValue / totalMaxPossible gives a ratio in roughly (-1, 1)
+  // Map to 0-100 scale: 0 = all wrong, 50 = break even, 100 = perfect
+  // Use (ratio + 1) / 2 to shift from (-1,1) to (0,1), then × 100
+  const ratio = totalMaxPossible > 0 ? totalValue / totalMaxPossible : 0;
+  const raw = ((ratio + 1) / 2) * 100 * volumeMultiplier;
+  return Math.round(Math.max(0, Math.min(100, raw)));
+}
+
+// Tier thresholds on the normalized 0-100 scale
 export const TIER_THRESHOLDS: Record<CredibilityTier, number> = {
   rookie: 0,
-  contender: 1000,
-  champion: 5000,
-  goat: 15000,
+  contender: 40,
+  champion: 60,
+  goat: 80,
 };
 
 export const TIER_LABELS: Record<CredibilityTier, string> = {
@@ -49,9 +150,9 @@ export const TIER_COLORS: Record<CredibilityTier, string> = {
 };
 
 export function getTierFromScore(score: number): CredibilityTier {
-  if (score >= 15000) return "goat";
-  if (score >= 5000) return "champion";
-  if (score >= 1000) return "contender";
+  if (score >= 80) return "goat";
+  if (score >= 60) return "champion";
+  if (score >= 40) return "contender";
   return "rookie";
 }
 
@@ -126,7 +227,27 @@ export function calculateCredibility(
     (result.finishType === "decision" || methodPoints > 0);
   const perfectPickBonus = isPerfect ? 50 : 0;
 
-  const totalPoints = winnerPoints + finishTypePoints + methodPoints + underdogBonus + perfectPickBonus;
+  // Penalty for wrong winner pick (negative, used for normalized score)
+  let penalty = 0;
+  if (!correctWinner) {
+    if (pickedFighterOdds == null) {
+      penalty = -50;
+    } else if (pickedFighterOdds <= -300) {
+      penalty = -100; // picked a massive favourite who lost
+    } else if (pickedFighterOdds <= -150) {
+      penalty = -75;
+    } else if (pickedFighterOdds <= -110) {
+      penalty = -50;
+    } else if (pickedFighterOdds <= 110) {
+      penalty = -35;
+    } else {
+      penalty = -20; // underdog pick that lost
+    }
+  }
+
+  const totalPoints = correctWinner
+    ? winnerPoints + finishTypePoints + methodPoints + underdogBonus + perfectPickBonus
+    : penalty; // wrong picks contribute negative points
 
   return {
     winnerPoints,
@@ -135,6 +256,7 @@ export function calculateCredibility(
     underdogBonus,
     perfectPickBonus,
     totalPoints,
+    penalty,
     multiplier: Math.round(multiplier * 100) / 100,
     impliedProbability: Math.round(impliedProb * 100),
   };

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   credibilityLog,
@@ -115,7 +115,7 @@ export async function getUpcomingEvents(): Promise<Event[]> {
 export async function getAllEvents(): Promise<Event[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(events).orderBy(asc(events.eventDate));
+  return db.select().from(events).orderBy(desc(events.eventDate));
 }
 
 export async function getEventById(id: number): Promise<Event | null> {
@@ -242,6 +242,71 @@ export async function getCredibilityLog(userId: number) {
   return db.select().from(credibilityLog).where(eq(credibilityLog.userId, userId)).orderBy(desc(credibilityLog.createdAt));
 }
 
+// ─── Normalized 0-100 Credibility Score Recalculation ────────────────────────
+
+/**
+ * Recalculate the normalized 0-100 credibility score for a single user
+ * from all their resolved predictions. Stores the result back to userProfiles.
+ */
+export async function recalcNormalizedScoreForUser(userId: number): Promise<number> {
+  const { calcNormalizedCredScore } = await import("../shared/types");
+  const dbConn = await getDb();
+  if (!dbConn) return 0;
+
+  // Fetch all resolved predictions for this user, joined with fight data
+  const rows = await dbConn
+    .select({
+      predStatus: predictions.status,
+      pickedFinishType: predictions.pickedFinishType,
+      pickedMethod: predictions.pickedMethod,
+      oddsAtPrediction: predictions.oddsAtPrediction,
+      fightFinishType: fights.finishType,
+      fightMethod: fights.method,
+      fightWinner: fights.winner,
+      pickedWinner: predictions.pickedWinner,
+    })
+    .from(predictions)
+    .innerJoin(fights, eq(predictions.fightId, fights.id))
+    .where(and(eq(predictions.userId, userId), sql`${predictions.status} != 'pending'`));
+
+  const pickData = rows.map((row) => ({
+    correct: row.pickedWinner === row.fightWinner,
+    pickedFinishType: row.pickedFinishType ?? null,
+    pickedMethod: row.pickedMethod ?? null,
+    resultFinishType: row.fightFinishType ?? null,
+    resultMethod: row.fightMethod ?? null,
+    pickedFighterOdds: row.oddsAtPrediction ?? null,
+  }));
+
+  const normalizedScore = calcNormalizedCredScore(pickData);
+
+  // Store normalized score back to userProfiles
+  await dbConn.update(userProfiles)
+    .set({ credibilityScore: normalizedScore })
+    .where(eq(userProfiles.userId, userId));
+
+  return normalizedScore;
+}
+
+/**
+ * Recalculate normalized 0-100 scores for ALL users with profiles.
+ * Used by the admin recalcAllScores endpoint.
+ */
+export async function recalcAllNormalizedScores(): Promise<{ userId: number; score: number }[]> {
+  const dbConn = await getDb();
+  if (!dbConn) return [];
+
+  const allProfiles = await dbConn.select({ userId: userProfiles.userId }).from(userProfiles);
+  const results: { userId: number; score: number }[] = [];
+
+  for (const profile of allProfiles) {
+    const score = await recalcNormalizedScoreForUser(profile.userId);
+    results.push({ userId: profile.userId, score });
+  }
+
+  return results;
+}
+
 // ─── Fighter Stats ────────────────────────────────────────────────────────────
 
 export async function getUserFighterStats(userId: number) {
@@ -365,9 +430,6 @@ export async function getEventLeaderboard(eventId: number, limit = 50) {
     .groupBy(credibilityLog.userId)
     .orderBy(desc(sql<number>`SUM(${credibilityLog.totalPoints})`))
     .limit(limit);
-
-  // Alias for join
-  const p = predictions;
 
   // Fetch profiles for these users
   if (rows.length === 0) return [];
