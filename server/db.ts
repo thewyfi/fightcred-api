@@ -115,7 +115,7 @@ export async function getUpcomingEvents(): Promise<Event[]> {
 export async function getAllEvents(): Promise<Event[]> {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(events).orderBy(desc(events.eventDate));
+  return db.select().from(events).orderBy(events.eventDate);
 }
 
 export async function getEventById(id: number): Promise<Event | null> {
